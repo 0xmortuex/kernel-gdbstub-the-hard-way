@@ -27,14 +27,19 @@ import build
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def find_qemu() -> str:
-    found = shutil.which("qemu-system-i386")
+def find_qemu(arch: str) -> str:
+    found = shutil.which(f"qemu-system-{arch}")
     if found:
         return found
-    win = r"C:\Program Files\qemu\qemu-system-i386.exe"
+    win = rf"C:\Program Files\qemu\qemu-system-{arch}.exe"
     if os.path.isfile(win):
         return win
-    sys.exit("qemu-system-i386 not found - install QEMU first")
+    sys.exit(f"qemu-system-{arch} not found - install QEMU first")
+
+
+# Module 11 needs more than one CPU to have anything to show. It runs once
+# per CPU count; its check reads the count from $QEMU_SMP.
+SMP = {11: (2, 4)}
 
 
 def free_port() -> int:
@@ -45,20 +50,21 @@ def free_port() -> int:
     return port
 
 
-def run_module(qemu: str, module: str) -> tuple[bool, str]:
+def run_module(module: str, smp: int = 1) -> tuple[bool, str]:
     stale = build.drift(module)
     if stale:
         return False, f"sources out of date with src/: {', '.join(stale)} (run: python build.py stage)"
     with tempfile.TemporaryDirectory() as tmp:
         elf = os.path.join(tmp, "kernel.elf")
         try:
-            build.build(module, elf)
+            image = build.build(module, elf)
         except subprocess.CalledProcessError as e:
             return False, f"build failed: {e}"
         port = free_port()
+        qemu = find_qemu("x86_64" if build.is_64bit(module) else "i386")
         vm = subprocess.Popen(
-            [qemu, "-kernel", elf, "-display", "none", "-no-reboot", "-m", "64",
-             "-serial", f"tcp:127.0.0.1:{port},server=on,wait=on"],
+            [qemu, "-kernel", image, "-display", "none", "-no-reboot", "-m", "64",
+             "-smp", str(smp), "-serial", f"tcp:127.0.0.1:{port},server=on,wait=on"],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
         try:
@@ -66,7 +72,7 @@ def run_module(qemu: str, module: str) -> tuple[bool, str]:
                 [sys.executable, os.path.join(ROOT, module, "check.py"),
                  "--port", str(port), "--elf", elf],
                 capture_output=True, text=True, timeout=180, cwd=ROOT,
-                env={**os.environ, "PYTHONPATH": ROOT},
+                env={**os.environ, "PYTHONPATH": ROOT, "QEMU_SMP": str(smp)},
             )
             return proc.returncode == 0, proc.stdout + proc.stderr
         except subprocess.TimeoutExpired:
@@ -77,7 +83,6 @@ def run_module(qemu: str, module: str) -> tuple[bool, str]:
 
 
 def main() -> int:
-    qemu = find_qemu()
     verbose = "-v" in sys.argv
     wanted = [a for a in sys.argv[1:] if a != "-v"]
     mods = [m for m in build.modules()
@@ -87,15 +92,20 @@ def main() -> int:
         print("no modules matched")
         return 1
     failed = []
+    runs = 0
     for m in mods:
-        start = time.monotonic()
-        ok, output = run_module(qemu, m)
-        print(f"{'PASS' if ok else 'FAIL'}  {m}  ({time.monotonic() - start:.1f}s)")
-        if not ok:
-            failed.append(m)
-        if not ok or verbose:
-            print("    " + output.strip().replace("\n", "\n    "))
-    print(f"\n{len(mods) - len(failed)}/{len(mods)} modules verified: "
+        for smp in SMP.get(int(m[:2]), (1,)):
+            runs += 1
+            label = m if smp == 1 else f"{m} (-smp {smp})"
+            start = time.monotonic()
+            ok, output = run_module(m, smp)
+            print(f"{'PASS' if ok else 'FAIL'}  {label}  ({time.monotonic() - start:.1f}s)")
+            if not ok:
+                failed.append(label)
+            if not ok or verbose:
+                print("    " + output.strip().replace("\n", "\n    "))
+    plural = "s" if len(mods) != 1 else ""
+    print(f"\n{runs - len(failed)}/{runs} runs verified ({len(mods)} module{plural}): "
           "real kernel, real QEMU, the kernel's own stub")
     return 1 if failed else 0
 

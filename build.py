@@ -7,7 +7,8 @@ src/ holds ONE copy of the kernel, with stage markers:
     //@endif
 
 Each module directory gets a clean copy at its stage, with no markers, so
-what you read in NN-module/ is exactly what that module builds.
+what you read in NN-module/ is exactly what that module builds. Modules 10
+and up are 64-bit and are staged from src64/ the same way.
 
     python build.py stage                 regenerate every module's sources
     python build.py build 05-memory ELF   build one module's kernel to ELF
@@ -26,6 +27,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
+SRC64 = os.path.join(ROOT, "src64")    # Modules 10+: x86-64 long mode
+LONG_MODE_STAGE = 10
 SOURCES = ("boot.s", "stub.c", "kernel.c", "linker.ld")
 _IF = re.compile(r"^\s*(?://|#)@if (\d+)(?:\.\.(\d+))?\s*$")
 _ENDIF = re.compile(r"^\s*(?://|#)@endif\s*$")
@@ -61,11 +64,16 @@ def stage_text(text: str, stage: int) -> str:
     return result
 
 
+def is_64bit(module: str) -> bool:
+    return int(module[:2]) >= LONG_MODE_STAGE
+
+
 def staged(module: str) -> dict[str, str]:
     stage = int(module[:2])
+    src = SRC64 if is_64bit(module) else SRC
     files = {}
     for name in SOURCES:
-        with open(os.path.join(SRC, name), encoding="utf-8") as fh:
+        with open(os.path.join(src, name), encoding="utf-8") as fh:
             files[name] = stage_text(fh.read(), stage)
     return files
 
@@ -92,12 +100,25 @@ def drift(module: str) -> list[str]:
     return bad
 
 
-def build(module: str, out_elf: str) -> None:
+def build(module: str, out_elf: str) -> str:
+    """Build the module's kernel to out_elf and return the image to boot.
+
+    32-bit modules boot the ELF itself. QEMU's multiboot loader refuses ELF64,
+    so 64-bit modules boot a flat binary (out_elf + ".bin") whose multiboot
+    header carries the load addresses (the "a.out kludge"); the ELF is still
+    what the debugger reads symbols from.
+    """
     mdir = os.path.join(ROOT, module)
-    zig = [sys.executable, "-m", "ziglang", "cc", "-target", "x86-freestanding-none"]
+    wide = is_64bit(module)
+    target = "x86_64-freestanding-none" if wide else "x86-freestanding-none"
+    zig = [sys.executable, "-m", "ziglang", "cc", "-target", target]
     cflags = ["-ffreestanding", "-fno-pie", "-fno-stack-protector", "-O0", "-g",
               "-fno-omit-frame-pointer", "-fno-sanitize=undefined",
               "-mno-sse", "-mno-sse2", "-mno-mmx", "-Wall", "-Werror"]
+    if wide:
+        # An exception in kernel mode pushes its frame right below RSP - over
+        # the 128-byte "red zone" leaf functions may use. Kernels turn it off.
+        cflags += ["-mno-red-zone", "-mgeneral-regs-only"]
     with tempfile.TemporaryDirectory() as tmp:
         objs = []
         for src, extra in (("boot.s", []), ("stub.c", cflags), ("kernel.c", cflags)):
@@ -107,6 +128,12 @@ def build(module: str, out_elf: str) -> None:
         subprocess.run([*zig, "-nostdlib", "-static", "-no-pie",
                         "-Wl,-T," + os.path.join(mdir, "linker.ld"), "-Wl,--build-id=none",
                         "-o", out_elf, *objs], check=True)
+    if not wide:
+        return out_elf
+    image = out_elf + ".bin"
+    subprocess.run([sys.executable, "-m", "ziglang", "objcopy", "-O", "binary", out_elf, image],
+                   check=True)
+    return image
 
 
 def main() -> int:
@@ -116,8 +143,8 @@ def main() -> int:
             print(f"staged {m}")
         return 0
     if len(sys.argv) == 4 and sys.argv[1] == "build":
-        build(sys.argv[2].rstrip("/\\"), sys.argv[3])
-        print(f"built {sys.argv[3]}")
+        image = build(sys.argv[2].rstrip("/\\"), sys.argv[3])
+        print(f"built {sys.argv[3]}" + (f" (boot {image})" if image != sys.argv[3] else ""))
         return 0
     print(__doc__)
     return 2

@@ -1,10 +1,10 @@
 # Kernel gdbstub — The Hard Way
 
-Put a debugger *inside* your kernel. Over nine modules you build the target side of the
+Put a debugger *inside* your kernel. Over eleven modules you build the target side of the
 GDB Remote Serial Protocol in C and assembly: a UART driver, packet framing, an exception
 handler that hands the trapped CPU to a debugger, fault-proof memory access,
-single-stepping, software breakpoints, and a target description. Then you debug the
-kernel through its own serial port with [gdbstub-mcp](https://github.com/0xmortuex/gdbstub-mcp)
+single-stepping, software breakpoints, and a target description. Then you take it to
+64-bit long mode and to several CPUs at once. You debug the kernel through its own serial port with [gdbstub-mcp](https://github.com/0xmortuex/gdbstub-mcp)
 or plain gdb. QEMU's built-in gdbstub is never turned on. Every line explained.
 
 ## Why This Exists
@@ -46,6 +46,8 @@ self-contained clang, so there's no cross toolchain to set up) and gdbstub-mcp.
 | 07 | [Software Breakpoints](07-software-breakpoints/) | Patching `int3`, rewinding EIP, the step-over dance, and hiding your own patches |
 | 08 | [Telling the Debugger What It's Talking To](08-telling-the-debugger-what-it-is-talking-to/) | `qSupported` and `target.xml`, so a generic client learns your register layout |
 | 09 | [Debugging It With an Agent](09-debugging-it-with-an-agent/) | gdbstub-mcp end to end against your stub, plus Ctrl-C over a serial line |
+| 10 | [Long Mode](10-long-mode/) | A 32-bit trampoline into long mode, the 64-bit trap frame, the amd64 `target.xml`, and the same client working unchanged |
+| 11 | [Many CPUs](11-many-cpus/) | Waking APs with INIT-SIPI-SIPI, stopping the world with NMIs, CPUs as RSP threads, and the stale-breakpoint race |
 
 Each module contains:
 - **`README.md`**: the concepts and design decisions
@@ -53,9 +55,10 @@ Each module contains:
 - **`check.py`**: talks to that kernel over its serial port and asserts what the README claims
 - **`break-it.md`**: challenges that break your own stub, with hints
 
-## One Kernel, Nine Stages
+## One Kernel, Eleven Stages
 
-There is one copy of the kernel, in [`src/`](src/), with stage markers:
+There is one copy of the 32-bit kernel, in [`src/`](src/), and one of the 64-bit kernel
+(Modules 10–11), in [`src64/`](src64/), each with stage markers:
 
 ```c
 //@if 5            kept from Module 05 on
@@ -81,6 +84,10 @@ qemu-system-i386 -kernel kernel.elf -display none \
 # or from an agent:         debug_connect(name="hw", port=4444, elf="kernel.elf")
 ```
 
+For the 64-bit modules, boot the flat image `build.py` prints with `qemu-system-x86_64`
+(add `-smp 4` for Module 11). QEMU's multiboot loader refuses ELF64, so the kernel uses
+the multiboot "a.out kludge". Debuggers still read symbols from the ELF.
+
 On real hardware the same kernel talks over a real COM1. Point gdb at the serial
 device (`target remote /dev/ttyUSB0`) at 115200 baud.
 
@@ -93,10 +100,12 @@ python verify.py        # or: python verify.py -v 09
 For each module, `verify.py`:
 1. checks the module's sources still match `src/`
 2. builds its kernel
-3. boots it in QEMU with COM1 on a TCP socket, and **without** QEMU's gdbstub
+3. boots it in QEMU with COM1 on a TCP socket, and **without** QEMU's gdbstub (Module 11
+   boots twice, with `-smp 2` and `-smp 4`)
 4. runs its `check.py`
 
-The last module drives gdbstub-mcp's own agent tools against the kernel. CI runs all of
+Modules 09 and 10 drive gdbstub-mcp's own agent tools against the kernel, in 32-bit and
+64-bit mode. CI runs all of
 this on every push.
 
 ## Architecture Overview
@@ -141,12 +150,13 @@ works with my client" into "a stub that works with any client".
 
 ## What's Simplified
 
-The stub is 32-bit x86, single-CPU and polled. Real stubs add these:
-- interrupt-driven break-in, via the UART IRQ instead of polling from the main loop
+The stub is polled, and one CPU owns it at a time. Real stubs add these:
+- interrupt-driven break-in, via the UART IRQ, instead of polling from the main loop
+  (only the boot CPU polls, so Ctrl-C always stops thread 1)
 - hardware breakpoints and watchpoints (DR0–DR7)
-- SMP: stopping the other CPUs with IPIs
-- 64-bit long mode
-- `vCont`, thread awareness, and binary `X` writes
+- `vCont`, for per-thread continue and step, and binary `X` writes
+- x2APIC, and more than 8 CPUs: the stub uses each CPU's APIC ID directly as its slot,
+  which works on QEMU, where IDs are 0, 1, 2…, but not on machines with sparse IDs
 
 Each module's `break-it.md` points at where those would go.
 

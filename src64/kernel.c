@@ -1,0 +1,56 @@
+/* kernel.c - the program being debugged, now in 64-bit long mode. Built -O0
+ * with frame pointers so lines and backtraces are exact. */
+
+void uart_init(void);
+void gdb_init(void);
+void gdb_breakpoint(void);
+void gdb_poll(void);
+//@if 11
+void smp_init(void);
+//@endif
+
+volatile unsigned int counter;
+volatile unsigned int break_now;   /* the debugger writes 1 here to stop in kmain */
+//@if 11
+
+/* One counter per CPU, indexed by local APIC ID. Each AP bumps its own. */
+volatile unsigned long ap_counter[8];
+
+void ap_work(int cpu) {
+    ap_counter[cpu]++;
+}
+
+/* Every application processor ends up here (see gdb_ap_start in stub.c). */
+void ap_main(int cpu) {
+    for (;;)
+        ap_work(cpu);
+}
+//@endif
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int compute(int n) {
+    int total = 0;
+    for (int i = 0; i < n; i++)
+        total = add(total, i);
+    return total;
+}
+
+void kmain(void) {
+    uart_init();
+    gdb_init();
+//@if 11
+    smp_init();         /* wake the other CPUs before stopping for the debugger */
+//@endif
+    gdb_breakpoint();   /* wait here for the debugger */
+    for (;;) {
+        counter += (unsigned int)compute(5);
+        if (break_now) {
+            break_now = 0;
+            gdb_breakpoint();
+        }
+        gdb_poll();
+    }
+}

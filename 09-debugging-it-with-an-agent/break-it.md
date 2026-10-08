@@ -50,12 +50,6 @@ SS:RSP, so the ESP problem from Module 04 goes away). Registers are 8 bytes in `
 XML becomes `i386:x86-64` with `org.gnu.gdb.i386.core` listing `rax`…`r15`, `rip`,
 `eflags` and the segment registers. Everything above the frame (framing, memory,
 breakpoints, qXfer) is unchanged. That's the payoff of keeping the layers separate.
+Module 10 does exactly this port.
 
-## Where to Go Next
-
-- **[gdbstub-mcp](https://github.com/0xmortuex/gdbstub-mcp):** the client you just
-  served, and its BACKLOG of ideas.
-- **[MCP Server — The Hard Way](https://github.com/0xmortuex/mcp-server-the-hard-way):**
-  the other end of this wire, built from scratch.
-- **[qemu-replay-mcp](https://github.com/0xmortuex/qemu-replay-mcp):** when a bug only
-  happens once, record it and debug it backwards.
+→ [Next: Module 10](../10-long-mode/README.md)
