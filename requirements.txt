@@ -1,0 +1,2 @@
+gdbstub-mcp @ git+https://github.com/0xmortuex/gdbstub-mcp
+ziglang
